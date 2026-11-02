@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import itertools
 from typing import Literal
+from unittest.mock import patch
 
+import numpy as np
 import pytest
+from scipy import stats
 
 import optuna
 
@@ -138,3 +142,59 @@ def test_wilcoxon_pruner_if_average_is_best_then_not_prune() -> None:
         average = sum(intermediate_values[: step + 1]) / (step + 1)
         if average <= 4.0:
             assert not trial.should_prune()
+
+
+@pytest.mark.parametrize("step_offset", [0, 2**53, 2**60])
+@pytest.mark.parametrize("direction", ["minimize", "maximize"])
+def test_wilcoxon_pruner_preserves_integer_step_ids(
+    step_offset: int, direction: Literal["minimize", "maximize"]
+) -> None:
+    p_threshold = 0.01
+    study = optuna.create_study(
+        direction=direction,
+        pruner=optuna.pruners.WilcoxonPruner(p_threshold=p_threshold),
+    )
+    study.add_trial(
+        optuna.trial.create_trial(
+            value=0.0,
+            intermediate_values={step_offset + step: 0.0 for step in range(8)},
+        )
+    )
+    trial = study.ask()
+    value = 1.0 if direction == "minimize" else -1.0
+    for n_reported, step in enumerate(reversed(range(8)), start=1):
+        trial.report(value, step_offset + step)
+        # All paired differences have the worse sign, whose exact one-sided probability is 2^-n.
+        assert trial.should_prune() == (2.0**-n_reported < p_threshold)
+
+
+@pytest.mark.parametrize("direction", ["minimize", "maximize"])
+def test_wilcoxon_pruner_pairs_and_orders_integer_step_ids(
+    direction: Literal["minimize", "maximize"],
+) -> None:
+    differences = [1, -2, 3, 4, 5, 6, 7, 8]
+    positive_rank_sum = sum(rank for rank in differences if rank > 0)
+    exact_p = sum(
+        sum(rank for rank, positive in enumerate(signs, start=1) if positive) >= positive_rank_sum
+        for signs in itertools.product([False, True], repeat=len(differences))
+    ) / 2 ** len(differences)
+    step_offset = 2**60
+    sign = 1 if direction == "minimize" else -1
+    study = optuna.create_study(
+        direction=direction,
+        pruner=optuna.pruners.WilcoxonPruner(p_threshold=0.05),
+    )
+    study.add_trial(
+        optuna.trial.create_trial(
+            value=35.0,
+            intermediate_values={step_offset + step: 10.0 * step for step in reversed(range(8))},
+        )
+    )
+    trial = study.ask()
+    for step in [7, 1, 6, 0, 5, 2, 4, 3]:
+        trial.report(10.0 * step + sign * differences[step], step_offset + step)
+
+    with patch("optuna.pruners._wilcoxon.ss.wilcoxon", wraps=stats.wilcoxon) as wilcoxon:
+        assert trial.should_prune() == (exact_p < 0.05)
+    assert wilcoxon.call_args is not None
+    np.testing.assert_array_equal(wilcoxon.call_args.args[0], np.array(differences) * sign)

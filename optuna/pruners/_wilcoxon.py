@@ -157,7 +157,7 @@ class WilcoxonPruner(BasePruner):
         if len(trial.intermediate_values) == 0:
             return False
 
-        steps, step_values = np.array(list(trial.intermediate_values.items())).T
+        step_values = np.array(list(trial.intermediate_values.values()))
 
         if np.any(~np.isfinite(step_values)):
             optuna_warn(
@@ -179,7 +179,7 @@ class WilcoxonPruner(BasePruner):
             )
             return False
 
-        best_steps, best_step_values = np.array(list(best_trial.intermediate_values.items())).T
+        best_step_values = np.array(list(best_trial.intermediate_values.values()))
 
         if np.any(~np.isfinite(best_step_values)):
             optuna_warn(
@@ -188,9 +188,11 @@ class WilcoxonPruner(BasePruner):
             )
             return False
 
-        _, idx1, idx2 = np.intersect1d(steps, best_steps, return_indices=True)
+        common_steps = sorted(
+            trial.intermediate_values.keys() & best_trial.intermediate_values.keys()
+        )
 
-        if len(idx1) < len(step_values):
+        if len(common_steps) < len(step_values):
             # This if-statement is never satisfied if following "average_is_best" safety works,
             # because the safety ensures that the best trial always has the all steps.
             optuna_warn(
@@ -199,7 +201,12 @@ class WilcoxonPruner(BasePruner):
                 "Those values are ignored."
             )
 
-        diff_values = step_values[idx1] - best_step_values[idx2]
+        diff_values = np.array(
+            [
+                trial.intermediate_values[step] - best_trial.intermediate_values[step]
+                for step in common_steps
+            ]
+        )
 
         if len(diff_values) < max(2, self._n_startup_steps):
             return False
